@@ -34,7 +34,11 @@ class handler(BaseHTTPRequestHandler):
                     req = urllib.request.Request(
                         motion_url,
                         data=json.dumps(motion_payload).encode('utf-8'),
-                        headers={'Content-Type': 'application/json'}
+                        headers={
+                            'Content-Type': 'application/json',
+                            'User-Agent': 'DataBlaze-Motion-Webhook/1.0',
+                            'Accept': 'application/json'
+                        }
                     )
 
                     try:
