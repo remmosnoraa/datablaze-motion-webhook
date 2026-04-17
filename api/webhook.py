@@ -44,18 +44,26 @@ class handler(BaseHTTPRequestHandler):
                     try:
                         response = urllib.request.urlopen(req)
                         response_data = response.read().decode('utf-8')
-
-                        self.send_response(200)
-                        self.end_headers()
-                        # Include the payload in the response for debugging
-                        response_msg = f'SUCCESS: Forwarded to Motion - {cleaned_data.get("First Name")} {cleaned_data.get("Last Name")}\n\nPayload sent:\n{json.dumps(motion_payload, indent=2)}'
-                        self.wfile.write(response_msg.encode())
-
+                        motion_status = 'SUCCESS'
+                        motion_detail = response_data[:200]
                     except urllib.error.HTTPError as e:
-                        error_body = e.read().decode('utf-8')
-                        self.send_response(500)
-                        self.end_headers()
-                        self.wfile.write(f'ERROR: Motion webhook failed - {e.code}: {error_body}'.encode())
+                        motion_status = 'FAILED'
+                        motion_detail = f'{e.code}: {e.read().decode("utf-8")[:200]}'
+
+                    # Fan out to the local case management Flask app.
+                    # Additive and non-blocking: if Flask is down or the
+                    # tunnel is broken, Motion still receives its data.
+                    flask_status = self._forward_to_flask(motion_payload)
+
+                    http_code = 200 if motion_status == 'SUCCESS' else 500
+                    self.send_response(http_code)
+                    self.end_headers()
+                    response_msg = (
+                        f'Motion: {motion_status} ({motion_detail})\n'
+                        f'Flask:  {flask_status}\n\n'
+                        f'Payload sent:\n{json.dumps(motion_payload, indent=2)}'
+                    )
+                    self.wfile.write(response_msg.encode())
 
                 else:
                     self.send_response(200)
@@ -70,6 +78,40 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(f'ERROR: {str(e)}'.encode())
+
+    def _forward_to_flask(self, payload):
+        """POST the cleaned payload to the local Flask case management app.
+
+        Returns a short human-readable status string. Never raises — Flask
+        is a secondary destination and must never break Motion forwarding.
+        """
+        flask_url = os.environ.get('FLASK_WEBHOOK_URL')
+        if not flask_url:
+            return 'SKIPPED (FLASK_WEBHOOK_URL not set)'
+
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'DataBlaze-Motion-Webhook/1.0',
+            'Accept': 'application/json',
+        }
+        api_key = os.environ.get('FLASK_WEBHOOK_API_KEY')
+        if api_key:
+            headers['X-API-Key'] = api_key
+
+        try:
+            req = urllib.request.Request(
+                flask_url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers=headers,
+            )
+            response = urllib.request.urlopen(req, timeout=5)
+            body = response.read().decode('utf-8')[:200]
+            return f'SUCCESS ({body})'
+        except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8')[:200]
+            return f'FAILED {e.code}: {body}'
+        except Exception as e:
+            return f'FAILED: {type(e).__name__}: {str(e)[:200]}'
 
     def _clean_client_data(self, client):
         """Extract and flatten relevant fields for Motion"""
