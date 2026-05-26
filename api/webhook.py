@@ -125,6 +125,7 @@ class handler(BaseHTTPRequestHandler):
 
         # Build cleaned data with only relevant fields
         cleaned = {
+            "id": client.get('id'),
             "Last Name": client.get('Last Name') or '',
             "First Name": client.get('First Name') or '',
             "LS File": client.get('LS File') or '',
