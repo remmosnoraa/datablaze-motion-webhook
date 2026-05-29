@@ -16,52 +16,29 @@ class handler(BaseHTTPRequestHandler):
             if webhook_data.get('event_type') == 'rows.updated' and webhook_data.get('items'):
                 client = webhook_data['items'][0]
 
-                # Only forward if "Add to Motion" is checked
+                # "Add to Motion" is the DataBlaze intake-trigger checkbox. The
+                # name is retained for backward-compat with the existing DataBlaze
+                # column; Motion is no longer a destination. The Motion fan-out was
+                # removed 2026-05-29: its agent-workflow webhook had been retired
+                # during the migration off Motion, and the Motion call had no
+                # timeout, so a hung Motion request was timing out the whole
+                # function and dropping the intake before it reached Flask.
                 if client.get('Add to Motion') == True:
-                    # Clean and flatten the data for Motion
+                    # Clean and flatten the row, then wrap it in the items array
+                    # the Flask intake expects (same shape Flask already ingests).
                     cleaned_data = self._clean_client_data(client)
+                    payload = {"items": [cleaned_data]}
 
-                    # Wrap in items array to match Motion's filter expectation
-                    motion_payload = {
-                        "items": [cleaned_data]
-                    }
+                    # The local Flask case manager is now the sole destination,
+                    # so its result drives the status reported back to DataBlaze.
+                    flask_ok, flask_detail = self._forward_to_flask(payload)
 
-                    # Forward to Motion's webhook
-                    motion_url = os.environ.get('MOTION_WEBHOOK_URL')
-                    if not motion_url:
-                        raise ValueError("MOTION_WEBHOOK_URL environment variable not set")
-
-                    req = urllib.request.Request(
-                        motion_url,
-                        data=json.dumps(motion_payload).encode('utf-8'),
-                        headers={
-                            'Content-Type': 'application/json',
-                            'User-Agent': 'DataBlaze-Motion-Webhook/1.0',
-                            'Accept': 'application/json'
-                        }
-                    )
-
-                    try:
-                        response = urllib.request.urlopen(req)
-                        response_data = response.read().decode('utf-8')
-                        motion_status = 'SUCCESS'
-                        motion_detail = response_data[:200]
-                    except urllib.error.HTTPError as e:
-                        motion_status = 'FAILED'
-                        motion_detail = f'{e.code}: {e.read().decode("utf-8")[:200]}'
-
-                    # Fan out to the local case management Flask app.
-                    # Additive and non-blocking: if Flask is down or the
-                    # tunnel is broken, Motion still receives its data.
-                    flask_status = self._forward_to_flask(motion_payload)
-
-                    http_code = 200 if motion_status == 'SUCCESS' else 500
+                    http_code = 200 if flask_ok else 500
                     self.send_response(http_code)
                     self.end_headers()
                     response_msg = (
-                        f'Motion: {motion_status} ({motion_detail})\n'
-                        f'Flask:  {flask_status}\n\n'
-                        f'Payload sent:\n{json.dumps(motion_payload, indent=2)}'
+                        f'Flask: {flask_detail}\n\n'
+                        f'Payload sent:\n{json.dumps(payload, indent=2)}'
                     )
                     self.wfile.write(response_msg.encode())
 
@@ -82,12 +59,13 @@ class handler(BaseHTTPRequestHandler):
     def _forward_to_flask(self, payload):
         """POST the cleaned payload to the local Flask case management app.
 
-        Returns a short human-readable status string. Never raises — Flask
-        is a secondary destination and must never break Motion forwarding.
+        Returns (ok, detail). ok is True only when Flask accepts the intake
+        (HTTP 2xx); it drives the status the relay reports back to DataBlaze.
+        Never raises.
         """
         flask_url = os.environ.get('FLASK_WEBHOOK_URL')
         if not flask_url:
-            return 'SKIPPED (FLASK_WEBHOOK_URL not set)'
+            return (False, 'MISCONFIGURED (FLASK_WEBHOOK_URL not set)')
 
         headers = {
             'Content-Type': 'application/json',
@@ -106,12 +84,12 @@ class handler(BaseHTTPRequestHandler):
             )
             response = urllib.request.urlopen(req, timeout=5)
             body = response.read().decode('utf-8')[:200]
-            return f'SUCCESS ({body})'
+            return (True, f'SUCCESS ({body})')
         except urllib.error.HTTPError as e:
             body = e.read().decode('utf-8')[:200]
-            return f'FAILED {e.code}: {body}'
+            return (False, f'FAILED {e.code}: {body}')
         except Exception as e:
-            return f'FAILED: {type(e).__name__}: {str(e)[:200]}'
+            return (False, f'FAILED: {type(e).__name__}: {str(e)[:200]}')
 
     def _clean_client_data(self, client):
         """Extract and flatten relevant fields for Motion"""

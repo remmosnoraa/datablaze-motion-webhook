@@ -11,8 +11,5 @@
       "src": "/api/webhook",
       "dest": "api/webhook.py"
     }
-  ],
-  "env": {
-    "MOTION_WEBHOOK_URL": "https://webhooks.usemotion.com/agent-webhook/agent_workflow/aaw_AhrfktoswbcJguPr8jvnP5"
-  }
+  ]
 }
